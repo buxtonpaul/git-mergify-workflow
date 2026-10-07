@@ -1,0 +1,197 @@
+#!/bin/bash
+
+SCRIPT_DIR=$(cd $(dirname $0) && pwd)
+
+function start {
+    if [ -z "$1" ]; then
+        echo "Error: Missing target git changelist."
+        return 1
+    fi
+
+    TARGET="$1"
+    CURRENT=$(git rev-parse HEAD)
+
+    if git tag | grep -q "cherry-pick-base"; then
+        echo "Error: Current head already tagged."
+        return 1
+    fi
+
+    if git tag | grep -q "cherry-pick-target"; then
+        echo "Error: Current head already tagged."
+        return 1
+    fi
+    
+    git tag cherry-pick-base
+    git tag cherry-pick-target $1
+    echo "Cherry-picking"
+    git cherry-pick cherry-pick-base..cherry-pick-target^2
+}
+
+function stopped_pick {
+    git rev-parse -q --verify CHERRY_PICK_HEAD >/dev/null
+}
+
+function sequence_in_progress {
+    [ -d "$(git rev-parse --git-path sequencer)" ]
+}
+
+function todo {
+    echo
+    echo "Unpicked commits"
+    if stopped_pick; then
+        git log --color=always --oneline --decorate CHERRY_PICK_HEAD..cherry-pick-target^2
+    elif sequence_in_progress; then
+        echo "Warning: cherry-pick sequence in progress but no commit stopped; remaining todo:"
+        cat "$(git rev-parse --git-path sequencer/todo)"
+    fi
+}
+function complete {
+    echo
+    if stopped_pick; then
+        echo "Picked commits including current conflict"
+        git log --color=always --oneline --decorate cherry-pick-base..CHERRY_PICK_HEAD
+    else
+        echo "Picked commits"
+        git log --color=always --oneline --decorate cherry-pick-base..HEAD
+    fi
+}
+
+function show {
+    git show CHERRY_PICK_HEAD 
+}
+
+function apply {
+    if ! git rev-parse -q --verify refs/tags/cherry-pick-base >/dev/null ||
+       ! git rev-parse -q --verify refs/tags/cherry-pick-target >/dev/null; then
+        echo "Error: tags cherry-pick-base or cherry-pick-target missing"
+        return 1
+    fi
+    if stopped_pick || sequence_in_progress; then
+        echo "Error: cherry-pick still in progress; finish it with 'git cherry-pick --continue'"
+        echo "(or --skip) until 'git cherrypick-merge todo' is empty"
+        return 1
+    fi
+
+    # Build the merge from the index, never from the working tree as a whole:
+    # stage changes to tracked files (e.g. a build fix made after the last
+    # pick) but leave untracked files alone. New files only go in if you
+    # 'git add' them explicitly first.
+    echo "Staging changes to tracked files"
+    git add -u || return 1
+    local tree
+    tree=$(git write-tree) || { echo "Error: index has unresolved conflicts"; return 1; }
+
+    local folded
+    folded=$(git diff --cached --stat HEAD)
+    if [ -n "$folded" ]; then
+        echo "Folding uncommitted changes into the merge:"
+        echo "$folded"
+    fi
+
+    local untracked
+    untracked=$(git ls-files --others --exclude-standard --directory)
+    if [ -n "$untracked" ]; then
+        echo "Not included (untracked):"
+        echo "$untracked" | sed 's/^/  /'
+    fi
+
+    echo "Creating merge commit with parents cherry-pick-base and cherry-pick-target"
+    local merge
+    merge=$(git cat-file commit cherry-pick-target | sed '1,/^$/d' | \
+        GIT_AUTHOR_NAME=$(git log -1 --format=%an cherry-pick-target) \
+        GIT_AUTHOR_EMAIL=$(git log -1 --format=%ae cherry-pick-target) \
+        GIT_AUTHOR_DATE=$(git log -1 --format=%ad --date=raw cherry-pick-target) \
+        git commit-tree -p cherry-pick-base -p cherry-pick-target "$tree") || return 1
+    git update-ref -m "cherrypick-merge: apply $(git rev-parse --short cherry-pick-target)" HEAD "$merge" || return 1
+
+    # Warn about (rather than silently commit) any gitlink not declared in
+    # .gitmodules, e.g. one staged by hand while resolving a conflict.
+    local declared_submodules
+    declared_submodules=" $(git config -f .gitmodules --get-regexp '\.path$' 2>/dev/null | awk '{print $2}') "
+    git diff --raw --diff-filter=A cherry-pick-base HEAD | awk '$2 == "160000" {print $NF}' | while read -r bad_path; do
+        case "$declared_submodules" in
+            *" $bad_path "*) ;;
+            *) echo "Warning: merge adds gitlink not declared in .gitmodules: $bad_path" ;;
+        esac
+    done
+
+    echo "Cleanup the tags"
+    git tag -d cherry-pick-base
+    git tag -d cherry-pick-target
+    git log -1 --oneline --decorate
+}
+
+function status {
+    if git rev-parse -q --verify refs/tags/cherry-pick-target >/dev/null; then
+        echo "Cherry-pick operation in progress:"
+        todo
+        complete
+    else
+        git status
+    fi
+}
+
+function abort {
+    git reset --hard cherry-pick-base
+    git tag -d cherry-pick-base
+    git tag -d cherry-pick-target
+}
+
+function show_merge_commits {
+    git log --first-parent --pretty="%h %s" HEAD..$1
+}
+
+
+function usage {
+    echo "
+git cherrypick-merge 
+Cherry pick the commits in a merge commit, and then create a merge commit with those changes
+
+start <commit> - start the cherrypick process
+apply - finish the commit process
+abort - abort the current cherry-pick process
+show - show the current conflicting commit
+todo - list the commits from the merge not yet cherry-picked
+complete - list the commits already cherry-picked, including the current conflict
+status - show the current status
+show-merge-commits <commit> - list the merge commits between the git merge base and the target commit
+"
+}
+
+command=$1
+shift
+
+case "${command}" in
+    start)
+        start "${@}"
+        ;;
+    apply)
+        apply
+        ;;
+    status)
+        status
+        ;;
+    show)
+        show
+        ;;
+    todo)
+        todo
+        ;;
+    complete)
+        complete
+        ;;
+    help|-h|--help)
+        usage
+        ;;
+    show-merge-commits)
+        show_merge_commits "${@}"
+        ;;
+    abort)
+        abort
+        ;;
+    *)
+        echo "Error: Unknown command ${command}" >&2
+        usage
+        exit 1
+esac
+

@@ -1,0 +1,6 @@
+[submodule "external/git-rebase-first-parent"]
+	path = external/git-rebase-first-parent
+	url = https://github.com/CTSRD-CHERI/git-rebase-first-parent.git
+[submodule "external/git-mergify-rebase"]
+	path = external/git-mergify-rebase
+	url = https://github.com/CTSRD-CHERI/git-mergify-rebase.git
