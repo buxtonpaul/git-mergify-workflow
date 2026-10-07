@@ -1,4 +1,4 @@
-# gittools: manual mergify toolkit
+# manual mergify toolkit
 
 Tools and instructions for bringing a long-lived fork (for example `qemu-cheri`) up to date with a
 new upstream release by **mergifying**: replaying upstream's history into the fork one upstream
